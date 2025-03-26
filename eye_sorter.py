@@ -204,11 +204,12 @@ def setup_folders(main_folder):
     unsorted_folder = os.path.join(main_folder, "unsorted")
     processed_folder = os.path.join(main_folder, "processed")
     invalid_folder = os.path.join(main_folder, "invalid")
+    retry_folder = os.path.join(main_folder, "retry")  # Added retry folder
     
-    for folder in [left_folder, right_folder, unsorted_folder, processed_folder, invalid_folder]:
+    for folder in [left_folder, right_folder, unsorted_folder, processed_folder, invalid_folder, retry_folder]:
         os.makedirs(folder, exist_ok=True)
     
-    return left_folder, right_folder, unsorted_folder, processed_folder, invalid_folder
+    return left_folder, right_folder, unsorted_folder, processed_folder, invalid_folder, retry_folder
 
 def move_unsorted_images(main_folder, unsorted_folder):
     """Move all image files from main folder to unsorted folder"""
@@ -318,6 +319,95 @@ def process_sorted_images(folder, side, reader):
         print(f"No valid results from {side} eye images.")
         return None
 
+def process_retry_images(retry_folder, left_folder, right_folder):
+    """Process images in the retry folder with manual input (no GUI)"""
+    print("\n" + "="*60)
+    print("PROCESSING RETRY IMAGES (TEXT ONLY - NO IMAGE DISPLAY)")
+    print("="*60)
+    
+    # Get list of images in the retry folder
+    image_files = glob.glob(os.path.join(retry_folder, "*.[jp][pn]g")) + \
+                  glob.glob(os.path.join(retry_folder, "*.jpeg"))
+    
+    if not image_files:
+        print("No images found in retry folder.")
+        return None, None
+    
+    print(f"Processing {len(image_files)} retry images...")
+    
+    left_results = []
+    right_results = []
+    
+    for image_path in image_files:
+        filename = os.path.basename(image_path)
+        print(f"\nProcessing retry image: {filename}")
+        
+        # Extract date from filename (same as in process_image)
+        date_text = ""
+        date_match = re.search(r'_(\d{8})', filename)
+        if date_match:
+            date_str = date_match.group(1)
+            try:
+                parsed_date = datetime.strptime(date_str, '%Y%m%d')
+                date_text = parsed_date.strftime('%m/%d/%Y')
+                print(f"Extracted date from filename: {date_text}")
+            except ValueError:
+                date_text = datetime.now().strftime('%m/%d/%Y')
+        else:
+            date_text = datetime.now().strftime('%m/%d/%Y')
+            
+        # Ask for manual input
+        print("\nPlease manually enter the data for this image:")
+        print(f"Filename: {filename}")
+        print(f"Date: {date_text}")
+        print("The center number is typically located around coordinates (1060, 560) to (1100, 588)")
+        
+        # Ask for the center number
+        while True:
+            center_text = input("Enter the center number (or press Enter to skip): ").strip()
+            if center_text == "" or center_text.isdigit():
+                break
+            print("Invalid input. Please enter digits only or press Enter to skip.")
+        
+        if center_text == "":
+            print(f"Skipping {filename} (no number entered).")
+            continue
+        
+        # Ask which eye this is (left or right)
+        while True:
+            eye_side = input("Is this a left or right eye? (l/r): ").strip().lower()
+            if eye_side in ['l', 'r']:
+                break
+            print("Invalid input. Please enter 'l' for left or 'r' for right.")
+        
+        # Add to the appropriate results list
+        result = {
+            "filename": filename,
+            "date": date_text,
+            "number": center_text
+        }
+        
+        dest_path = ""
+        if eye_side == 'l':
+            left_results.append(result)
+            dest_path = os.path.join(left_folder, filename)
+        else:  # eye_side == 'r'
+            right_results.append(result)
+            dest_path = os.path.join(right_folder, filename)
+        
+        # Move the image to the appropriate folder
+        try:
+            shutil.copy(image_path, dest_path)
+            print(f"Copied to {'left' if eye_side == 'l' else 'right'} folder: {filename}")
+        except Exception as e:
+            print(f"Error copying {filename}: {e}")
+    
+    # Convert results to DataFrames
+    left_df = pd.DataFrame(left_results) if left_results else None
+    right_df = pd.DataFrame(right_results) if right_results else None
+    
+    return left_df, right_df
+
 def main():
     # Initialize EasyOCR reader with English language
     print("Initializing EasyOCR reader... (this may take a moment on first run)")
@@ -331,10 +421,10 @@ def main():
     print("="*60)
     print(f"Main folder: {main_folder}")
     
-    # Setup the folder structure
-    left_folder, right_folder, unsorted_folder, processed_folder, invalid_folder = setup_folders(main_folder)
+    # Setup the folder structure (now including retry folder)
+    left_folder, right_folder, unsorted_folder, processed_folder, invalid_folder, retry_folder = setup_folders(main_folder)
     
-    print(f"Created folders: left, right, unsorted, processed, invalid")
+    print(f"Created folders: left, right, unsorted, processed, invalid, retry")
     
     # Move images to unsorted folder
     moved_count = move_unsorted_images(main_folder, unsorted_folder)
@@ -350,7 +440,8 @@ def main():
     print("INSTRUCTIONS")
     print("="*60)
     print("1. Manually move VALID images from the 'unsorted' folder to either 'left' or 'right' folder")
-    print("2. After sorting all images, press Enter to continue processing")
+    print("2. For images that weren't detected but should be processed, move them to the 'retry' folder")
+    print("3. After sorting all images, press Enter to continue processing")
     print("="*60)
     
     input("\nPress Enter when you've finished manually sorting the images...")
@@ -360,6 +451,24 @@ def main():
     
     # Process right images
     right_df = process_sorted_images(right_folder, "right", reader)
+    
+    # Process retry images with manual input
+    left_retry_df, right_retry_df = process_retry_images(retry_folder, left_folder, right_folder)
+    
+    # Combine main dataframes with retry dataframes
+    if left_df is not None and left_retry_df is not None and not left_retry_df.empty:
+        left_df = pd.concat([left_df, left_retry_df]).reset_index(drop=True)
+        print(f"Added {len(left_retry_df)} manually processed left eye images")
+    elif left_df is None and left_retry_df is not None and not left_retry_df.empty:
+        left_df = left_retry_df
+        print(f"Created left eye dataframe with {len(left_retry_df)} manually processed images")
+    
+    if right_df is not None and right_retry_df is not None and not right_retry_df.empty:
+        right_df = pd.concat([right_df, right_retry_df]).reset_index(drop=True)
+        print(f"Added {len(right_retry_df)} manually processed right eye images")
+    elif right_df is None and right_retry_df is not None and not right_retry_df.empty:
+        right_df = right_retry_df
+        print(f"Created right eye dataframe with {len(right_retry_df)} manually processed images")
     
     # Sort and format date before saving to Excel
     timestamp = time.strftime("%Y%m%d-%H%M%S")
