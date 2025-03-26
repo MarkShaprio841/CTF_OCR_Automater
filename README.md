@@ -126,9 +126,3 @@ Once the script runs, the following folders will be created (inside your specifi
 - Pandas: For data manipulation and Excel report generation.
 - Standard Libraries: `os`, `glob`, `shutil`, `time`, `re`, and `datetime` for file handling and processing.
 
-
-For any questions or feedback, please contact [Your Name](mailto:your.email@example.com).
-
----
-
-This README should provide a comprehensive guide to setting up, using, and understanding the OCT Report Processor. Happy processing!
