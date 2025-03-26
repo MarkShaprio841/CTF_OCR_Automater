@@ -6,17 +6,137 @@ import pandas as pd
 import shutil
 import time
 import re
+import numpy as np
 from datetime import datetime
 
 # Global reader to avoid reinitialization
 READER = None
 
-def get_input_with_default(prompt, default_value):
-    """Get input with a default value"""
-    response = input(f"{prompt} [{default_value}]: ").strip()
-    if not response:
-        return default_value
-    return response
+def detect_eye_side(image_path):
+    """
+    Detect if an image is for left or right eye by looking for the blue filled circle
+    next to OD (right eye) or OS (left eye) in the top-right corner
+    """
+    # Load the image
+    image = cv2.imread(image_path)
+    if image is None:
+        return None
+    
+    height, width = image.shape[:2]
+    
+    # The OD/OS indicators are typically in the top right corner with blue circles
+    # Extract the region where OD/OS markers would be (top right area)
+    top_height = height // 6  # Top 1/6th of the image
+    marker_region = image[0:top_height, width//2:width]
+    
+    # Convert to HSV for better color detection
+    hsv = cv2.cvtColor(marker_region, cv2.COLOR_BGR2HSV)
+    
+    # Define range for blue color (the filled circle is typically blue)
+    # Blue HSV range can vary, so we'll use a range that should capture most blue circles
+    lower_blue = np.array([90, 50, 50])  # Lighter blues
+    upper_blue = np.array([130, 255, 255])  # Darker blues
+    
+    # Create a mask for blue regions
+    blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    
+    # Find contours of blue regions - these could be our filled circles
+    contours, _ = cv2.findContours(blue_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # If we found some blue regions, let's analyze them
+    if contours:
+        # Filter for circular contours of appropriate size
+        blue_circles = []
+        for contour in contours:
+            # Get the area of the contour
+            area = cv2.contourArea(contour)
+            
+            # Filter out very small or very large contours
+            if 20 < area < 2000:  # Adjust these thresholds based on your images
+                # Check if it's approximately circular
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter > 0:  # Avoid division by zero
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    if circularity > 0.5:  # More circular shapes have values closer to 1
+                        # Get the center of the contour
+                        M = cv2.moments(contour)
+                        if M["m00"] != 0:
+                            cx = int(M["m10"] / M["m00"])
+                            cy = int(M["m01"] / M["m00"])
+                            blue_circles.append((cx, cy, area))
+        
+        # If we found blue circles, try to determine eye side
+        if blue_circles:
+            # Sort circles by size (largest first)
+            blue_circles.sort(key=lambda x: x[2], reverse=True)
+            
+            # For debugging, draw the circles on a copy of the region
+            debug_img = marker_region.copy()
+            for cx, cy, area in blue_circles:
+                cv2.circle(debug_img, (cx, cy), 5, (0, 255, 0), -1)
+            
+            # Now use OCR to find the position of the OD and OS text
+            gray = cv2.cvtColor(marker_region, cv2.COLOR_BGR2GRAY)
+            
+            # Use OCR to find text in the region
+            global READER
+            results = READER.readtext(gray)
+            
+            # Look for OD and OS text
+            od_pos = None
+            os_pos = None
+            
+            for bbox, text, conf in results:
+                # Get the center of the text box
+                center_x = sum(p[0] for p in bbox) / 4
+                center_y = sum(p[1] for p in bbox) / 4
+                
+                # Check for OD and OS (case insensitive)
+                if "OD" in text.upper():
+                    od_pos = (center_x, center_y)
+                if "OS" in text.upper():
+                    os_pos = (center_x, center_y)
+            
+            # If we found both OD and OS positions, see which one is closer to the blue circle
+            if od_pos and os_pos:
+                # Get the largest blue circle
+                circle_x, circle_y, _ = blue_circles[0]
+                
+                # Calculate distances from circle to OD and OS
+                dist_to_od = np.sqrt((circle_x - od_pos[0])**2 + (circle_y - od_pos[1])**2)
+                dist_to_os = np.sqrt((circle_x - os_pos[0])**2 + (circle_y - os_pos[1])**2)
+                
+                # The closer one indicates the eye
+                if dist_to_od < dist_to_os:
+                    print(f"Detected RIGHT eye (OD) - Blue circle is closer to OD")
+                    return "right"
+                else:
+                    print(f"Detected LEFT eye (OS) - Blue circle is closer to OS")
+                    return "left"
+    
+    # If we reach here, try fallback methods
+    # Look for just the text OD or OS which may indicate the eye even without the blue circle
+    gray = cv2.cvtColor(marker_region, cv2.COLOR_BGR2GRAY)
+    text = ' '.join(READER.readtext(gray, detail=0))
+    
+    if "OD" in text.upper() and "OS" not in text.upper():
+        print("Detected RIGHT eye (OD) by text")
+        return "right"
+    elif "OS" in text.upper() and "OD" not in text.upper():
+        print("Detected LEFT eye (OS) by text")
+        return "left"
+    elif "OD" in text.upper() and "OS" in text.upper():
+        # Both appear, check the order - typically the selected eye is marked first
+        if text.upper().find("OD") < text.upper().find("OS"):
+            print("Detected RIGHT eye (OD) by text order")
+            return "right"
+        else:
+            print("Detected LEFT eye (OS) by text order")
+            return "left"
+    
+    # If all else fails
+    print("Could not determine eye side")
+    return None
 
 def check_if_macula_thickness(image_path):
     """Check if the image is a macula thickness map based on title text"""
@@ -79,7 +199,7 @@ def extract_central_thickness(image_path):
     
     # Look for keywords then check nearby text for numbers
     for i, (_, text, _) in enumerate(text_results):
-        if "central" in text.lower() or "thickness" in text.lower():
+        if "central" in text.lower() or "thickness" in text.lower() or "subfield" in text.lower():
             # Check the next few entries for a number
             for j in range(max(0, i-2), min(i+5, len(text_results))):
                 candidate = text_results[j][1]
@@ -103,7 +223,7 @@ def extract_central_thickness(image_path):
     return None
 
 def process_image(image_path):
-    """Process a single image to extract OCT data"""
+    """Process a single image to extract OCT data and determine eye side"""
     print(f"\nProcessing: {os.path.basename(image_path)}")
     
     # Check if this is a macula thickness map
@@ -111,14 +231,17 @@ def process_image(image_path):
     
     if not is_thickness_map:
         print(f"Skipping {os.path.basename(image_path)} - Not a macula thickness map")
-        return None, None, "other"
+        return None, None, None, "other"
     
     # Extract central thickness value
     thickness_value = extract_central_thickness(image_path)
     
     if not thickness_value:
         print(f"No thickness value found in {os.path.basename(image_path)}")
-        return None, None, "invalid"
+        return None, None, None, "invalid"
+    
+    # Detect eye side
+    eye_side = detect_eye_side(image_path)
     
     # Extract filename info for backup date
     filename = os.path.basename(image_path)
@@ -164,8 +287,8 @@ def process_image(image_path):
         if not date_text:
             date_text = datetime.now().strftime('%m/%d/%Y')
     
-    print(f"Success - Thickness: {thickness_value}, Date: {date_text}")
-    return thickness_value, date_text, "valid"
+    print(f"Success - Thickness: {thickness_value}, Date: {date_text}, Eye: {eye_side if eye_side else 'Unknown'}")
+    return thickness_value, date_text, eye_side, "valid"
 
 def setup_folders(main_folder):
     """Create necessary folders for sorting"""
@@ -212,7 +335,7 @@ def move_unsorted_images(main_folder, unsorted_folder):
     
     return moved_count
 
-def pre_process_images(main_folder, folders, default_eye=None):
+def pre_process_images(main_folder, folders):
     """Pre-process images to identify and auto-sort images"""
     left_folder, right_folder, unsorted_folder, processed_folder, invalid_folder, retry_folder, other_scans_folder = folders
     
@@ -234,13 +357,14 @@ def pre_process_images(main_folder, folders, default_eye=None):
     other_count = 0
     auto_sorted_left = 0
     auto_sorted_right = 0
+    manual_sort_needed = 0
     
     for image_path in image_files:
         filename = os.path.basename(image_path)
         print(f"Checking: {filename}")
         
         # Process the image
-        thickness, date, result_type = process_image(image_path)
+        thickness, date, eye_side, result_type = process_image(image_path)
         
         # Handle different cases
         if thickness is None:
@@ -266,37 +390,138 @@ def pre_process_images(main_folder, folders, default_eye=None):
             # We have a valid macula thickness map
             valid_count += 1
             
-            # If we have a default eye setting, use it
-            if default_eye == "left":
+            # Auto-sort by eye if detected
+            if eye_side == "left":
                 dest_path = os.path.join(left_folder, filename)
                 try:
                     shutil.move(image_path, dest_path)
                     auto_sorted_left += 1
-                    print(f"Auto-sorted to left eye folder (based on default): {filename}")
+                    print(f"Auto-sorted to left eye folder: {filename}")
                 except Exception as e:
                     print(f"Error moving {filename}: {e}")
-            elif default_eye == "right":
+            elif eye_side == "right":
                 dest_path = os.path.join(right_folder, filename)
                 try:
                     shutil.move(image_path, dest_path)
                     auto_sorted_right += 1
-                    print(f"Auto-sorted to right eye folder (based on default): {filename}")
+                    print(f"Auto-sorted to right eye folder: {filename}")
                 except Exception as e:
                     print(f"Error moving {filename}: {e}")
             else:
-                # No default, leave in unsorted for manual sorting
-                print(f"Valid thickness map, manual sorting needed: {filename}")
+                # Could not determine eye side, leave in unsorted for manual sorting
+                manual_sort_needed += 1
+                print(f"Eye side not detected, manual sorting needed: {filename}")
     
     print(f"\nPre-processing complete:")
     print(f"  Valid macula thickness maps: {valid_count}")
-    if default_eye:
-        print(f"    - Auto-sorted to {default_eye} eye folder: {auto_sorted_left if default_eye == 'left' else auto_sorted_right}")
-    else:
-        print(f"    - All valid maps require manual sorting")
+    print(f"    - Auto-sorted to left eye folder: {auto_sorted_left}")
+    print(f"    - Auto-sorted to right eye folder: {auto_sorted_right}")
+    print(f"    - Requiring manual eye sorting: {manual_sort_needed}")
     print(f"  Invalid macula thickness maps: {invalid_count}")
     print(f"  Other scan types (not macula thickness): {other_count}")
     
     return valid_count > 0
+
+def process_retry_images(retry_folder, left_folder, right_folder):
+    """Process images in the retry folder with manual input"""
+    print("\n" + "="*60)
+    print("PROCESSING RETRY IMAGES")
+    print("="*60)
+    
+    # Get list of images in the retry folder
+    image_files = glob.glob(os.path.join(retry_folder, "*.[jp][pn]g")) + \
+                  glob.glob(os.path.join(retry_folder, "*.jpeg"))
+    
+    if not image_files:
+        print("No images found in retry folder.")
+        return None, None
+    
+    print(f"Processing {len(image_files)} retry images...")
+    
+    left_results = []
+    right_results = []
+    
+    for image_path in image_files:
+        filename = os.path.basename(image_path)
+        print(f"\nProcessing retry image: {filename}")
+        
+        # Try to process automatically first
+        thickness, date, eye_side, result_type = process_image(image_path)
+        
+        # If automatic processing failed, or eye side wasn't detected, get manual input
+        if thickness is None or result_type == "invalid":
+            print("Could not automatically extract thickness value.")
+            thickness = input("Enter the thickness value manually: ").strip()
+            if not thickness:
+                print(f"Skipping {filename} (no thickness value entered).")
+                continue
+        else:
+            print(f"Found thickness value: {thickness}")
+            confirm = input(f"Is this thickness value correct? (y/n): ").strip().lower()
+            if confirm != 'y':
+                thickness = input("Enter the correct thickness value: ").strip()
+                if not thickness:
+                    print(f"Skipping {filename} (no thickness value entered).")
+                    continue
+        
+        # Use the date if found, otherwise use today's date
+        if not date:
+            date = datetime.now().strftime('%m/%d/%Y')
+            print(f"Using today's date: {date}")
+        
+        # If eye side wasn't detected, ask for it
+        if not eye_side:
+            while True:
+                eye_choice = input("Is this a left or right eye? (l/r): ").strip().lower()
+                if eye_choice in ['l', 'r']:
+                    eye_side = "left" if eye_choice == 'l' else "right"
+                    break
+                print("Invalid input. Please enter 'l' for left or 'r' for right.")
+        else:
+            # Confirm eye side if auto-detected
+            print(f"Detected {eye_side.upper()} eye")
+            confirm = input(f"Is this correct? (y/n): ").strip().lower()
+            if confirm != 'y':
+                while True:
+                    eye_choice = input("Is this a left or right eye? (l/r): ").strip().lower()
+                    if eye_choice in ['l', 'r']:
+                        eye_side = "left" if eye_choice == 'l' else "right"
+                        break
+                    print("Invalid input. Please enter 'l' for left or 'r' for right.")
+        
+        # Add to appropriate results list
+        if eye_side == "left":
+            left_results.append({
+                "filename": filename,
+                "date": date,
+                "thickness": thickness
+            })
+            # Copy to left folder
+            dest_path = os.path.join(left_folder, filename)
+            try:
+                shutil.copy(image_path, dest_path)
+                print(f"Copied to left folder: {filename}")
+            except Exception as e:
+                print(f"Error copying {filename}: {e}")
+        else:  # eye_side == "right"
+            right_results.append({
+                "filename": filename,
+                "date": date,
+                "thickness": thickness
+            })
+            # Copy to right folder
+            dest_path = os.path.join(right_folder, filename)
+            try:
+                shutil.copy(image_path, dest_path)
+                print(f"Copied to right folder: {filename}")
+            except Exception as e:
+                print(f"Error copying {filename}: {e}")
+    
+    # Convert results to DataFrames
+    left_df = pd.DataFrame(left_results) if left_results else None
+    right_df = pd.DataFrame(right_results) if right_results else None
+    
+    return left_df, right_df
 
 def main():
     # Initialize EasyOCR reader with English language (just once, globally)
@@ -308,7 +533,7 @@ def main():
     main_folder = r"C:\Users\Markk\Downloads\TBP"
     
     print("\n" + "="*60)
-    print("OCT REPORT PROCESSOR - MANUAL EYE SELECTION")
+    print("OCT REPORT PROCESSOR - AUTO EYE DETECTION")
     print("="*60)
     print(f"Main folder: {main_folder}")
     
@@ -318,24 +543,12 @@ def main():
     
     print(f"Created folders: left, right, unsorted, processed, invalid, retry, other_scans")
     
-    # Ask user if all scans are for the same eye
-    print("\nAre all the images from the same eye? This can speed up processing.")
-    same_eye = input("Are all images from the same eye? (y/n): ").strip().lower()
-    
-    default_eye = None
-    if same_eye == 'y':
-        eye_choice = input("Which eye? (l for left, r for right): ").strip().lower()
-        if eye_choice == 'l':
-            default_eye = "left"
-        elif eye_choice == 'r':
-            default_eye = "right"
-    
     # Move images to unsorted folder
     moved_count = move_unsorted_images(main_folder, unsorted_folder)
     print(f"Moved {moved_count} images to the unsorted folder")
     
-    # Pre-process images with optional default eye setting
-    has_valid_images = pre_process_images(main_folder, folders, default_eye)
+    # Pre-process images to identify valid ones and auto-sort by eye when possible
+    has_valid_images = pre_process_images(main_folder, folders)
     
     if not has_valid_images:
         return
@@ -343,137 +556,77 @@ def main():
     print("\n" + "="*60)
     print("INSTRUCTIONS")
     print("="*60)
-    if default_eye:
-        print(f"1. All valid macula thickness maps have been moved to the {default_eye} eye folder")
-        print(f"2. Check the {default_eye} eye folder to make sure all images are correct")
-    else:
-        print("1. Manually move images from the 'unsorted' folder to either 'left' or 'right' folder")
-    print("2. For images that weren't detected but should be processed, move them to the 'retry' folder")
-    print("3. After sorting all images, press Enter to continue processing")
+    print("1. Check the left and right folders - images have been auto-sorted when possible")
+    print("2. Manually move any remaining images from the 'unsorted' folder to either 'left' or 'right' folder")
+    print("3. For images that weren't detected but should be processed, move them to the 'retry' folder")
+    print("4. After sorting all images, press Enter to continue processing")
     print("="*60)
     
     input("\nPress Enter when you've finished manually sorting the images...")
     
-    # Process left and right folders (these will contain the manual sorting results)
-    left_results = []
-    right_results = []
+    # Process left images
+    left_df = None
+    right_df = None
     
-    # Process images in left folder
+    # Get all images in left folder
     left_files = glob.glob(os.path.join(left_folder, "*.[jp][pn]g")) + \
                  glob.glob(os.path.join(left_folder, "*.jpeg"))
     
-    print(f"\nProcessing {len(left_files)} left eye images")
-    for image_path in left_files:
-        thickness, date, result_type = process_image(image_path)
-        if thickness is not None:
-            left_results.append({
-                "filename": os.path.basename(image_path),
-                "date": date,
-                "thickness": thickness
-            })
+    if left_files:
+        print(f"\nProcessing {len(left_files)} left eye images")
+        left_results = []
+        
+        for image_path in left_files:
+            # Try to process - but ignore eye side result since we know it's left
+            thickness, date, _, result_type = process_image(image_path)
+            if thickness is not None:
+                left_results.append({
+                    "filename": os.path.basename(image_path),
+                    "date": date,
+                    "thickness": thickness
+                })
+        
+        if left_results:
+            left_df = pd.DataFrame(left_results)
     
-    # Process images in right folder
+    # Get all images in right folder
     right_files = glob.glob(os.path.join(right_folder, "*.[jp][pn]g")) + \
                   glob.glob(os.path.join(right_folder, "*.jpeg"))
     
-    print(f"\nProcessing {len(right_files)} right eye images")
-    for image_path in right_files:
-        thickness, date, result_type = process_image(image_path)
-        if thickness is not None:
-            right_results.append({
-                "filename": os.path.basename(image_path),
-                "date": date,
-                "thickness": thickness
-            })
-    
-    # Process any images in the retry folder
-    retry_files = glob.glob(os.path.join(retry_folder, "*.[jp][pn]g")) + \
-                  glob.glob(os.path.join(retry_folder, "*.jpeg"))
-    
-    if retry_files:
-        print(f"\nProcessing {len(retry_files)} retry images")
+    if right_files:
+        print(f"\nProcessing {len(right_files)} right eye images")
+        right_results = []
         
-        # Ask if all retry images are for the same eye
-        retry_same_eye = input("Are all retry images from the same eye? (y/n): ").strip().lower()
-        
-        retry_default_eye = None
-        if retry_same_eye == 'y':
-            retry_eye_choice = input("Which eye? (l for left, r for right): ").strip().lower()
-            if retry_eye_choice == 'l':
-                retry_default_eye = "left"
-            elif retry_eye_choice == 'r':
-                retry_default_eye = "right"
-        
-        # Process each retry image
-        for image_path in retry_files:
-            filename = os.path.basename(image_path)
-            print(f"\nProcessing retry image: {filename}")
-            
-            # Try to extract thickness and date automatically
-            thickness, date, result_type = process_image(image_path)
-            
-            # If automatic extraction failed, ask for manual input
-            if thickness is None or result_type == "invalid":
-                print("Could not automatically extract thickness value.")
-                thickness = input("Enter the thickness value manually: ").strip()
-                if not thickness:
-                    print(f"Skipping {filename} (no thickness value entered).")
-                    continue
-            else:
-                print(f"Found thickness value: {thickness}")
-                confirm = input(f"Is this thickness value correct? (y/n): ").strip().lower()
-                if confirm != 'y':
-                    thickness = input("Enter the correct thickness value: ").strip()
-                    if not thickness:
-                        print(f"Skipping {filename} (no thickness value entered).")
-                        continue
-            
-            # Use the date if found, otherwise ask for it
-            if not date:
-                date = datetime.now().strftime('%m/%d/%Y')
-                print(f"Using today's date: {date}")
-            
-            # Determine which eye if not using default
-            eye_side = retry_default_eye
-            if not eye_side:
-                while True:
-                    eye_choice = input("Is this a left or right eye? (l/r): ").strip().lower()
-                    if eye_choice in ['l', 'r']:
-                        eye_side = "left" if eye_choice == 'l' else "right"
-                        break
-                    print("Invalid input. Please enter 'l' for left or 'r' for right.")
-            
-            # Add to appropriate results list
-            if eye_side == "left":
-                left_results.append({
-                    "filename": filename,
-                    "date": date,
-                    "thickness": thickness
-                })
-                # Copy to left folder
-                dest_path = os.path.join(left_folder, filename)
-                try:
-                    shutil.copy(image_path, dest_path)
-                    print(f"Copied to left folder: {filename}")
-                except Exception as e:
-                    print(f"Error copying {filename}: {e}")
-            else:  # eye_side == "right"
+        for image_path in right_files:
+            # Try to process - but ignore eye side result since we know it's right
+            thickness, date, _, result_type = process_image(image_path)
+            if thickness is not None:
                 right_results.append({
-                    "filename": filename,
+                    "filename": os.path.basename(image_path),
                     "date": date,
                     "thickness": thickness
                 })
-                # Copy to right folder
-                dest_path = os.path.join(right_folder, filename)
-                try:
-                    shutil.copy(image_path, dest_path)
-                    print(f"Copied to right folder: {filename}")
-                except Exception as e:
-                    print(f"Error copying {filename}: {e}")
+        
+        if right_results:
+            right_df = pd.DataFrame(right_results)
     
-    # Create dataframes from the results
-    left_df = pd.DataFrame(left_results) if left_results else None
-    right_df = pd.DataFrame(right_results) if right_results else None
+    # Process retry images with manual input
+    left_retry_df, right_retry_df = process_retry_images(retry_folder, left_folder, right_folder)
+    
+    # Combine main dataframes with retry dataframes
+    if left_df is not None and left_retry_df is not None and not left_retry_df.empty:
+        left_df = pd.concat([left_df, left_retry_df]).reset_index(drop=True)
+        print(f"Added {len(left_retry_df)} manually processed left eye images")
+    elif left_df is None and left_retry_df is not None and not left_retry_df.empty:
+        left_df = left_retry_df
+        print(f"Created left eye dataframe with {len(left_retry_df)} manually processed images")
+    
+    if right_df is not None and right_retry_df is not None and not right_retry_df.empty:
+        right_df = pd.concat([right_df, right_retry_df]).reset_index(drop=True)
+        print(f"Added {len(right_retry_df)} manually processed right eye images")
+    elif right_df is None and right_retry_df is not None and not right_retry_df.empty:
+        right_df = right_retry_df
+        print(f"Created right eye dataframe with {len(right_retry_df)} manually processed images")
     
     # Sort and format date before saving to Excel
     timestamp = time.strftime("%Y%m%d-%H%M%S")
