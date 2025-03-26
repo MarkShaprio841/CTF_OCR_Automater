@@ -1,114 +1,134 @@
 OCT Report Processor
 
-This project is a Python script that processes Optical Coherence Tomography (OCT) report images to extract the Central Subfield Thickness value. It uses computer vision and optical character recognition (OCR) to analyze images, sort them into folders (e.g., left eye, right eye, unsorted, invalid), and export the results to Excel files.
+The OCT Report Processor is a Python-based tool designed to automate the extraction and processing of Optical Coherence Tomography (OCT) reports. It leverages OCR (via EasyOCR) to detect and extract key data—such as macula thickness and report dates—from OCT images, and then sorts and processes these images into organized folders. The final output includes Excel reports summarizing the results for both left and right eye scans.
+
+ Table of Contents
+- [Overview](overview)
+- [Features](features)
+- [Installation](installation)
+- [Usage](usage)
+- [Folder Structure](folder-structure)
+- [Code Breakdown](code-breakdown)
+- [Dependencies](dependencies)
+- [Contributing](contributing)
+- [License](license)
+- [Contact](contact)
+
+ Overview
+
+This project automates the processing of OCT images by:
+- Detecting macula thickness maps: Uses OCR to search for specific keywords (e.g., "Macula Thickness" or "Central Thickness") in predefined regions of an image.
+- Extracting key metrics: Identifies the central subfield thickness value and extracts a date from either the image content or filename.
+- Sorting images: Automatically moves images to designated folders (left, right, unsorted, invalid, retry, or other scans) based on the extraction results.
+- Generating reports: Produces Excel spreadsheets that summarize the processed data (date, thickness, and filename) for each eye.
 
  Features
 
-- OCT Report Detection: Quickly checks if an image is likely an OCT report by analyzing colors (pink/green in the ETDRS grid) and layout.
-- OCR-Based Extraction: Uses EasyOCR to extract the central thickness value (in µm) from a targeted region of the image.
-- Automatic & Manual Sorting: Pre-processes images by moving invalid ones to a separate folder. Allows you to manually sort valid images into left/right folders and to retry processing images that were not automatically handled.
-- Excel Export: Compiles the extracted data (date, thickness value, and filename) into Excel files, formatted and sorted by date.
-- Folder Management: Automatically creates and manages subfolders for left, right, unsorted, invalid, processed, and retry images.
-
- Dependencies
-
-Before running the script, make sure you have the following Python packages installed:
-
-- [OpenCV](https://opencv.org/) (`opencv-python`)
-- [EasyOCR](https://github.com/JaidedAI/EasyOCR)
-- [Pandas](https://pandas.pydata.org/)
-
-Other modules such as `os`, `glob`, `shutil`, `time`, `re`, and `datetime` are part of the standard Python library.
+- Automated Image Detection: Recognizes OCT scans containing macula thickness maps.
+- OCR-Based Data Extraction: Uses EasyOCR to extract thickness values and dates from images.
+- Flexible Sorting Options: Supports both automatic sorting (if all images are from the same eye) and manual intervention.
+- Comprehensive Folder Management: Organizes images into multiple folders (e.g., `left`, `right`, `unsorted`, `invalid`, `retry`, `other_scans`, `processed`).
+- Excel Reporting: Outputs sorted and formatted data into Excel files with standardized date formats.
 
  Installation
 
-1. Clone the Repository or Download the Script
+1. Clone the Repository:
 
-   Clone the repository or simply download the Python script file.
+   ```bash
+   git clone https://github.com/your_username/oct-report-processor.git
+   cd oct-report-processor
+   ```
 
-2. Install Python Dependencies
+2. (Optional) Create and Activate a Virtual Environment:
 
-   It is recommended to use a virtual environment. Then, install the required packages via pip:
+   ```bash
+   python -m venv venv
+    On macOS/Linux:
+   source venv/bin/activate
+    On Windows:
+   venv\Scripts\activate
+   ```
+
+3. Install Required Packages:
 
    ```bash
    pip install opencv-python easyocr pandas
    ```
 
-   If you do not have pip, please install it or refer to the [Python Packaging User Guide](https://packaging.python.org/tutorials/installing-packages/).
-
-3. Verify Installation
-
-   Make sure that Python is installed by running:
-
-   ```bash
-   python --version
-   ```
+   > *Note:* Ensure you have a compatible version of Python (3.6 or above) installed.
 
  Usage
 
-1. Prepare Your Images
+1. Configure the Main Folder:
+   - In the `main()` function of the script, update the `main_folder` variable to point to the directory containing your OCT images. For example:
+     
+     ```python
+     main_folder = r"C:\Users\YourName\Path\To\Images"
+     ```
 
-   - Place all OCT report images (supported formats: JPG, JPEG, PNG) in your main folder (e.g., `C:\Users\Markk\Downloads\TBP`).
-   - The script will move these images to an `unsorted` folder inside the main folder.
-
-2. Folder Structure
-
-   Upon execution, the script creates the following subfolders inside the main folder:
-
-   - `left` — For images identified as left eye reports.
-   - `right` — For images identified as right eye reports.
-   - `unsorted` — Where the script initially moves all images.
-   - `invalid` — For images that are not valid OCT reports.
-   - `retry` — For images that may need manual reprocessing.
-   - `processed` — Where images will be moved after processing.
-
-3. Run the Script
-
-   Execute the script with:
+2. Run the Script:
 
    ```bash
-   python your_script_name.py
+   python main.py
    ```
 
-   During execution, the following happens:
-   
-   - Initialization: The EasyOCR reader is initialized.
-   - Pre-Processing: Images are checked for valid OCT reports and moved to appropriate folders.
-   - Manual Sorting: You will be prompted to move valid images from the `unsorted` folder to either the `left` or `right` folder. For images that weren’t automatically processed, move them to the `retry` folder.
-   - Data Extraction: Once you press Enter after sorting, the script processes the left and right eye images, extracts the central thickness values, and compiles the results.
-   - Excel Export: The processed data is saved as Excel files (`left_results_TIMESTAMP.xlsx` and `right_results_TIMESTAMP.xlsx`) in the main folder.
-   - Processed Images: You are given an option to move all processed images into the `processed` folder.
+3. Follow On-Screen Instructions:
+   - Initialization: The script initializes the EasyOCR reader (using GPU if available) and sets up the folder structure.
+   - Image Sorting: It moves images from the main folder into an `unsorted` folder and pre-processes them to identify valid macula thickness maps.
+   - Eye Selection: You will be prompted to indicate if all images are from the same eye (left or right) to enable auto-sorting.
+   - Manual Intervention: For images that couldn’t be automatically processed, you will have the opportunity to manually sort or input missing data.
+   - Report Generation: Once processing is complete, Excel reports for left and right eye images are generated.
+   - Finalizing: Optionally, you can choose to move processed images to a designated folder.
 
-4. Manual Retry
+ Folder Structure
 
-   If some images could not be processed automatically, they are handled in the `retry` step. The script prompts you to manually enter the thickness value and to designate whether the image is from the left or right eye.
+Once the script runs, the following folders will be created (inside your specified main folder):
 
- How It Works
+- left: Contains images sorted as left eye scans.
+- right: Contains images sorted as right eye scans.
+- unsorted: Images awaiting manual sorting.
+- processed: Images that have been fully processed.
+- invalid: OCT scans identified as invalid or with missing data.
+- retry: Images that require reprocessing or manual intervention.
+- other_scans: Scans that are not recognized as macula thickness maps (e.g., line raster scans).
 
-1. Image Verification:  
-   The function `quick_check_macula_thickness()` uses HSV color thresholds to detect characteristic pink/green hues and the presence of grid patterns (via edge detection and Hough Circles) to verify that an image is likely an OCT report.
+ Code Breakdown
 
-2. Data Extraction:  
-   The `extract_central_thickness()` function focuses on a specific section (typically the bottom right corner) where the “Central Subfield Thickness” is expected. It applies OCR to this region, checks for keywords, and extracts plausible numerical values within a realistic range.
+- `get_input_with_default(prompt, default_value)`  
+  Prompts the user with a default value if no input is provided.
 
-3. Folder and File Management:  
-   Several helper functions manage image movement:
-   - `setup_folders()` creates necessary subdirectories.
-   - `move_unsorted_images()` relocates all images into the `unsorted` folder.
-   - `pre_process_images()` scans images, validates them, and moves invalid images to an `invalid` folder.
-   - `process_sorted_images()` and `process_retry_images()` handle sorted and manually retried images, respectively.
+- `check_if_macula_thickness(image_path)`  
+  Uses OCR to determine if an image contains a macula thickness map by searching for key phrases in a predefined title region and an additional check in the bottom half of the image.
 
-4. Final Processing and Export:  
-   The main function coordinates initialization, processing, manual intervention, and finally exports the results to Excel. It also handles date formatting and sorting.
+- `extract_central_thickness(image_path)`  
+  Extracts the central thickness value from the OCT report by scanning for keywords and nearby numerical values within the image.
 
- Troubleshooting
+- `process_image(image_path)`  
+  Combines the above functions to process an individual image, extract relevant metrics (thickness and date), and determine its validity.
 
-- EasyOCR Initialization:  
-  The first run may take some time to initialize the OCR engine. Subsequent runs should be faster.
+- `setup_folders(main_folder)`  
+  Creates the necessary sub-folders for sorting and processing images.
 
-- Image Loading Errors:  
-  Ensure that your images are in supported formats (JPG, JPEG, PNG) and that they are not corrupted.
+- `move_unsorted_images(main_folder, unsorted_folder)`  
+  Moves all image files from the main folder to the `unsorted` folder.
 
-- Folder Permissions:  
-  Verify that the script has permission to create and move files within the designated main folder.
+- `pre_process_images(main_folder, folders, default_eye=None)`  
+  Processes the images in the `unsorted` folder, auto-sorts them based on the default eye (if provided), and handles invalid/other scan types.
 
+- `main()`  
+  The entry point for the script that initializes OCR, sets up folders, processes images, prompts for manual interventions (if necessary), and finally generates Excel reports.
+
+ Dependencies
+
+- Python 3.6+
+- OpenCV: For image processing.
+- EasyOCR: For optical character recognition.
+- Pandas: For data manipulation and Excel report generation.
+- Standard Libraries: `os`, `glob`, `shutil`, `time`, `re`, and `datetime` for file handling and processing.
+
+
+For any questions or feedback, please contact [Your Name](mailto:your.email@example.com).
+
+---
+
+This README should provide a comprehensive guide to setting up, using, and understanding the OCT Report Processor. Happy processing!
