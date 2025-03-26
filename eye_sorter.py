@@ -7,64 +7,127 @@ import shutil
 import time
 import re
 from datetime import datetime
-import difflib
 
-def check_macula_thickness(image, reader):
-    """Check if the image contains 'Macula Thickness' text in the specified region"""
-    height, width = image.shape[:2]
+# Global reader to avoid reinitialization
+READER = None
+
+def quick_check_macula_thickness(image):
+    """Fast check if image is likely an OCT report based on colors and layout"""
+    # Check for specific colors in OCT reports (pink/green in the ETDRS grid)
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     
-    # Define the region to search for "Macula Thickness" text
-    # Between top (200, 300) and bottom (620, 400)
-    x = 200
-    y = 300
-    w = 620 - 200
-    h = 400 - 300
+    # Check for pink (common in ETDRS grid)
+    pink_lower = (140, 50, 150)
+    pink_upper = (170, 255, 255)
+    pink_mask = cv2.inRange(hsv, pink_lower, pink_upper)
     
-    # Ensure the region is within image boundaries
-    if x < 0 or y < 0 or (x + w) > width or (y + h) > height:
-        return False
+    # Check for green (common in ETDRS grid)
+    green_lower = (40, 50, 50)
+    green_upper = (80, 255, 255)
+    green_mask = cv2.inRange(hsv, green_lower, green_upper)
     
-    # Crop the region
-    macula_region = image[y:y+h, x:x+w]
+    # If we find enough pink or green areas, it's likely an OCT report
+    pink_count = cv2.countNonZero(pink_mask)
+    green_count = cv2.countNonZero(green_mask)
     
-    if macula_region.size == 0:
-        return False
-    
-    # Convert to grayscale
-    macula_gray = cv2.cvtColor(macula_region, cv2.COLOR_BGR2GRAY)
-    
-    # Try to detect text in this region
-    try:
-        text_results = reader.readtext(macula_gray, detail=0)
-    except TypeError:
-        text_results = [result[1] for result in reader.readtext(macula_gray)]
-    
-    # Join all text results
-    all_text = ' '.join(text_results).lower()
-    print(f"Text detected in macula region: {all_text}")
-    
-    # Check if "Macula Thickness" (or close variant) is in the text
-    if "macula thickness" in all_text or "macular thickness" in all_text:
-        print("Found 'Macula Thickness' text")
+    if pink_count > 1000 or green_count > 1000:
         return True
     
-    # If not exact match, check for close matches using fuzzy matching
-    if "macula" in all_text and "thick" in all_text:
-        print("Found partial 'Macula Thickness' text")
-        return True
-        
-    # Use difflib to check for similar text (handles OCR errors)
-    for text in text_results:
-        similarity = difflib.SequenceMatcher(None, text.lower(), "macula thickness").ratio()
-        if similarity > 0.6:  # 60% similarity threshold
-            print(f"Found similar text to 'Macula Thickness': {text} (similarity: {similarity:.2f})")
-            return True
+    # If no color match, check for a grid-like structure
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
     
-    print("'Macula Thickness' text not found in the expected region")
+    # Check for circular patterns (ETDRS grid is circular)
+    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, 20,
+                               param1=50, param2=30, minRadius=30, maxRadius=100)
+    
+    if circles is not None and len(circles[0]) >= 1:
+        return True
+    
     return False
 
+def extract_central_thickness(image, reader):
+    """Extract the Central Subfield Thickness value from the OCT report"""
+    height, width = image.shape[:2]
+    
+    # Targeted approach - only scan bottom right corner for table
+    # This is where "Central Subfield Thickness" typically appears
+    x = max(0, width // 2)
+    y = max(0, height * 2 // 3)  # Bottom third
+    w = width - x
+    h = height - y
+    
+    # Crop the bottom-right section
+    bottom_right = image[y:y+h, x:x+w]
+    
+    # Resize for faster OCR (smaller size)
+    scale_factor = 0.8
+    small_br = cv2.resize(bottom_right, (0, 0), fx=scale_factor, fy=scale_factor)
+    
+    # Convert to grayscale
+    gray_br = cv2.cvtColor(small_br, cv2.COLOR_BGR2GRAY)
+    
+    # First try to find numbers that appear after "Central" or "Thickness"
+    try:
+        text_results = reader.readtext(gray_br, detail=1)
+        
+        # Sort text by y-coordinate (top to bottom)
+        text_results.sort(key=lambda x: x[0][0][1])  # Sort by y-coordinate of top-left point
+        
+        # Look for keywords and then check the next items
+        for i, (bbox, text, conf) in enumerate(text_results):
+            if any(keyword in text.lower() for keyword in ['central', 'subfield', 'thickness', 'µm']):
+                # Look at nearby text elements for numbers
+                for j in range(max(0, i-3), min(i+4, len(text_results))):
+                    candidate = text_results[j][1]
+                    digits = ''.join(c for c in candidate if c.isdigit())
+                    
+                    # Check if it's a plausible thickness value (200-600 µm is typical)
+                    if digits and 2 <= len(digits) <= 3:
+                        if 150 <= int(digits) <= 800:
+                            print(f"Found thickness value: {digits}")
+                            return digits
+    except Exception as e:
+        print(f"Error in extracting text: {e}")
+    
+    # If still not found, try a simpler approach - just find all 3-digit numbers
+    try:
+        all_text = reader.readtext(gray_br, detail=0)
+        for text in all_text:
+            # Extract all numbers
+            numbers = re.findall(r'\b\d{2,3}\b', text)
+            for num in numbers:
+                if 150 <= int(num) <= 800:
+                    print(f"Found potential thickness value: {num}")
+                    return num
+    except:
+        pass
+    
+    # Last resort - manual analysis
+    # Look for text in center box of ETDRS grid (typically positioned in the upper right quadrant)
+    try:
+        # Focus just on the upper right quadrant where ETDRS grid is usually located
+        grid_region = image[0:height//2, width//2:width]
+        # Make the image grayscale and apply threshold to highlight numbers
+        gray_grid = cv2.cvtColor(grid_region, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray_grid, 180, 255, cv2.THRESH_BINARY_INV)
+        
+        grid_text = reader.readtext(thresh, detail=0)
+        
+        for text in grid_text:
+            digits = ''.join(c for c in text if c.isdigit())
+            if digits and 2 <= len(digits) <= 3:
+                if 150 <= int(digits) <= 800:
+                    print(f"Found thickness value in ETDRS grid: {digits}")
+                    return digits
+    except:
+        pass
+        
+    print("Could not find central thickness value")
+    return None
+
 def process_image(image_path, reader):
-    """Process a single image to extract date and center number using EasyOCR"""
+    """Process a single image to extract OCT data"""
     print(f"Processing: {os.path.basename(image_path)}")
     
     # Load the image
@@ -73,19 +136,18 @@ def process_image(image_path, reader):
         print(f"Warning: Could not load image: {image_path}")
         return None
 
-    # Check for "Macula Thickness" text
-    has_macula_text = check_macula_thickness(image, reader)
-    if not has_macula_text:
-        print(f"Invalid: No 'Macula Thickness' text found in {os.path.basename(image_path)}")
+    # Quick check if this looks like an OCT report (based on colors/features)
+    if not quick_check_macula_thickness(image):
+        print(f"Invalid: Not an OCT report: {os.path.basename(image_path)}")
         return None
 
-    height, width = image.shape[:2]
-
-    # IMPORTANT: Always process images even if we can't detect numbers
-    # Extract filename info first - this will be our fallback
+    # Extract central thickness value
+    thickness_value = extract_central_thickness(image, reader)
+    
+    # Extract filename info for backup date
     filename = os.path.basename(image_path)
     
-    # Try to extract date from filename
+    # Try to extract date from filename or image
     date_text = ""
     date_match = re.search(r'_(\d{8})', filename)
     if date_match:
@@ -98,103 +160,16 @@ def process_image(image_path, reader):
         except ValueError:
             # If date can't be parsed, use today's date
             date_text = datetime.now().strftime('%m/%d/%Y')
+    else:
+        # Use today's date if no date found
+        date_text = datetime.now().strftime('%m/%d/%Y')
     
-    # Try to extract a number from filename as backup
-    backup_number = ""
-    number_match = re.search(r'_(\d{4,6})_', filename)
-    if number_match:
-        backup_number = number_match.group(1)
-        print(f"Backup number from filename: {backup_number}")
-
-    # --- Try multiple regions for center number ---
-    # Original center region
-    x_center, y_center = 1060, 560
-    w_center = 1100 - 1060  # 40
-    h_center = 588 - 560    # 28
-    
-    # Alternative regions to try (adjust as needed)
-    center_regions = [
-        (1060, 560, 40, 28),    # Original
-        (1050, 550, 60, 48),    # Slightly larger and offset
-        (1030, 540, 80, 60),    # Even larger
-        (1000, 520, 120, 100),  # Much larger area
-    ]
-    
-    center_text = ""
-    
-    # Try each region until we find a number
-    for region in center_regions:
-        x, y, w, h = region
-        
-        # Ensure crop coordinates are within the image boundaries
-        if x < 0 or y < 0 or (x + w) > width or (y + h) > height:
-            continue  # Skip this region if out of bounds
-        
-        # Crop the center region
-        center_crop = image[y:y+h, x:x+w]
-        
-        if center_crop.size == 0:
-            continue  # Skip empty crops
-        
-        # Try multiple preprocessing methods
-        results = []
-        
-        # Method 1: Grayscale with histogram equalization
-        center_gray = cv2.cvtColor(center_crop, cv2.COLOR_BGR2GRAY)
-        center_gray = cv2.equalizeHist(center_gray)
-        # Use detail=0 if available, otherwise process the full result
-        try:
-            gray_results = reader.readtext(center_gray, detail=0)
-        except TypeError:
-            # If detail parameter not supported, use default and extract text
-            gray_results = [result[1] for result in reader.readtext(center_gray)]
-        results.extend(gray_results)
-        
-        # Method 2: Binary with Otsu thresholding
-        _, center_binary = cv2.threshold(center_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        try:
-            binary_results = reader.readtext(center_binary, detail=0)
-        except TypeError:
-            binary_results = [result[1] for result in reader.readtext(center_binary)]
-        results.extend(binary_results)
-        
-        # Method 3: Adaptive thresholding
-        center_adaptive = cv2.adaptiveThreshold(
-            center_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-        )
-        try:
-            adaptive_results = reader.readtext(center_adaptive, detail=0)
-        except TypeError:
-            adaptive_results = [result[1] for result in reader.readtext(center_adaptive)]
-        results.extend(adaptive_results)
-        
-        # Process results to find any number
-        for result in results:
-            # Filter to just digits
-            digits = ''.join(char for char in result if char.isdigit())
-            if digits:
-                center_text = digits
-                print(f"Found center number: {center_text}")
-                break
-        
-        if center_text:
-            break  # Found a number, stop trying regions
-    
-    # If still no center text but we have a backup, use it
-    if not center_text and backup_number:
-        center_text = backup_number
-        print(f"Using backup number from filename: {center_text}")
-    
-    # Always return results even if one field is empty
-    # This ensures we don't discard images unnecessarily
-    print(f"Final values - Date: '{date_text}', Number: '{center_text}'")
-    
-    # Only skip if BOTH date and number are missing
-    if not date_text and not center_text:
-        print(f"Skipping {filename} (no date or number detected).")
+    # If we don't have a thickness value, this image isn't useful
+    if not thickness_value:
+        print(f"No thickness value found in {filename}")
         return None
         
-    return date_text, center_text
+    return date_text, thickness_value
 
 def setup_folders(main_folder):
     """Create necessary folders for manual sorting"""
@@ -304,11 +279,11 @@ def process_sorted_images(folder, side, reader):
         if ocr_result is None:
             continue
             
-        date_text, center_text = ocr_result
+        date_text, thickness_value = ocr_result
         results.append({
             "filename": os.path.basename(image_path),
             "date": date_text,
-            "number": center_text
+            "thickness": thickness_value
         })
     
     if results:
@@ -322,7 +297,7 @@ def process_sorted_images(folder, side, reader):
 def process_retry_images(retry_folder, left_folder, right_folder):
     """Process images in the retry folder with manual input (no GUI)"""
     print("\n" + "="*60)
-    print("PROCESSING RETRY IMAGES (TEXT ONLY - NO IMAGE DISPLAY)")
+    print("PROCESSING RETRY IMAGES")
     print("="*60)
     
     # Get list of images in the retry folder
@@ -360,17 +335,17 @@ def process_retry_images(retry_folder, left_folder, right_folder):
         print("\nPlease manually enter the data for this image:")
         print(f"Filename: {filename}")
         print(f"Date: {date_text}")
-        print("The center number is typically located around coordinates (1060, 560) to (1100, 588)")
+        print("Look for the Central Subfield Thickness value in the bottom table")
         
-        # Ask for the center number
+        # Ask for the thickness value
         while True:
-            center_text = input("Enter the center number (or press Enter to skip): ").strip()
-            if center_text == "" or center_text.isdigit():
+            thickness_value = input("Enter the Central Subfield Thickness (e.g., 359): ").strip()
+            if thickness_value == "" or thickness_value.isdigit():
                 break
             print("Invalid input. Please enter digits only or press Enter to skip.")
         
-        if center_text == "":
-            print(f"Skipping {filename} (no number entered).")
+        if thickness_value == "":
+            print(f"Skipping {filename} (no thickness value entered).")
             continue
         
         # Ask which eye this is (left or right)
@@ -384,7 +359,7 @@ def process_retry_images(retry_folder, left_folder, right_folder):
         result = {
             "filename": filename,
             "date": date_text,
-            "number": center_text
+            "thickness": thickness_value
         }
         
         dest_path = ""
@@ -409,19 +384,20 @@ def process_retry_images(retry_folder, left_folder, right_folder):
     return left_df, right_df
 
 def main():
-    # Initialize EasyOCR reader with English language
+    # Initialize EasyOCR reader with English language (just once, globally)
+    global READER
     print("Initializing EasyOCR reader... (this may take a moment on first run)")
-    reader = easyocr.Reader(['en'], gpu=False)  # Basic initialization
+    READER = easyocr.Reader(['en'], gpu=True)  # Basic initialization
     
     # Folder path containing your images
     main_folder = r"C:\Users\Markk\Downloads\TBP"
     
     print("\n" + "="*60)
-    print("OCT REPORT PROCESSOR - MANUAL SORTING (EasyOCR Version)")
+    print("OCT REPORT PROCESSOR - OPTIMIZED VERSION")
     print("="*60)
     print(f"Main folder: {main_folder}")
     
-    # Setup the folder structure (now including retry folder)
+    # Setup the folder structure
     left_folder, right_folder, unsorted_folder, processed_folder, invalid_folder, retry_folder = setup_folders(main_folder)
     
     print(f"Created folders: left, right, unsorted, processed, invalid, retry")
@@ -431,7 +407,7 @@ def main():
     print(f"Moved {moved_count} images to the unsorted folder")
     
     # Pre-process images to identify valid ones
-    has_valid_images = pre_process_images(main_folder, unsorted_folder, invalid_folder, reader)
+    has_valid_images = pre_process_images(main_folder, unsorted_folder, invalid_folder, READER)
     
     if not has_valid_images:
         return
@@ -447,10 +423,10 @@ def main():
     input("\nPress Enter when you've finished manually sorting the images...")
     
     # Process left images
-    left_df = process_sorted_images(left_folder, "left", reader)
+    left_df = process_sorted_images(left_folder, "left", READER)
     
     # Process right images
-    right_df = process_sorted_images(right_folder, "right", reader)
+    right_df = process_sorted_images(right_folder, "right", READER)
     
     # Process retry images with manual input
     left_retry_df, right_retry_df = process_retry_images(retry_folder, left_folder, right_folder)
@@ -522,7 +498,7 @@ def main():
             # Create final formatted dataframe
             final_df = pd.DataFrame({
                 'Date': sorted_df['formatted_date'],
-                'Number': sorted_df['number'],
+                'Thickness': sorted_df['thickness'],
                 'Filename': sorted_df['filename']
             })
             
@@ -533,7 +509,7 @@ def main():
             # If date conversion fails, create a basic dataframe without date formatting
             final_df = pd.DataFrame({
                 'Date': sorted_df['date'],
-                'Number': sorted_df['number'],
+                'Thickness': sorted_df['thickness'],
                 'Filename': sorted_df['filename']
             })
             return final_df
