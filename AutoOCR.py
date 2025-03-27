@@ -138,6 +138,157 @@ def detect_eye_side(image_path):
     print("Could not determine eye side")
     return None
 
+def advanced_eye_detection(image_path):
+    """
+    More advanced eye detection methods for images that failed initial classification.
+    This function uses different approaches than the primary detection method.
+    """
+    # Load the image
+    image = cv2.imread(image_path)
+    if image is None:
+        return None
+    
+    height, width = image.shape[:2]
+    
+    # 1. Check for specific patterns in the Zeiss format report header
+    # This method focuses specifically on the filled circle in OD/OS indicators at top
+    try:
+        # Get the exact region where the OD/OS indicators appear in Zeiss reports
+        header_region = image[170:200, width-220:width-80]
+        
+        # Convert to grayscale and threshold to isolate filled circles
+        gray = cv2.cvtColor(header_region, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
+        
+        # Split into OD and OS sides (left half is OD, right half is OS)
+        w = binary.shape[1]
+        od_region = binary[:, :w//2]
+        os_region = binary[:, w//2:]
+        
+        # Count dark pixels in each region (filled circles have more dark pixels)
+        od_pixels = np.sum(od_region > 0)
+        os_pixels = np.sum(os_region > 0)
+        
+        # Need significant difference to be confident
+        if od_pixels > 100 and od_pixels > os_pixels * 1.3:
+            print(f"ADVANCED: Detected RIGHT eye (OD) by filled circle pattern")
+            return "right"
+        elif os_pixels > 100 and os_pixels > od_pixels * 1.3:
+            print(f"ADVANCED: Detected LEFT eye (OS) by filled circle pattern")
+            return "left"
+    except Exception as e:
+        print(f"Error in advanced circle detection: {e}")
+    
+    # 2. Wider color range method - scan for blue/dark areas in a broader region
+    try:
+        # Get an expanded region for the header
+        top_region = image[0:height//4, width//2:width]
+        
+        # Convert to HSV for better color detection
+        hsv = cv2.cvtColor(top_region, cv2.COLOR_BGR2HSV)
+        
+        # Try multiple color ranges to find filled indicators
+        color_ranges = [
+            # Dark blue
+            (np.array([100, 100, 50]), np.array([140, 255, 255])),
+            # Broader blue
+            (np.array([90, 50, 50]), np.array([150, 255, 255])),
+            # Dark areas (for black filled circles)
+            (np.array([0, 0, 0]), np.array([180, 255, 100]))
+        ]
+        
+        for lower, upper in color_ranges:
+            mask = cv2.inRange(hsv, lower, upper)
+            
+            # Split into left and right halves
+            h, w = mask.shape
+            left_half = mask[:, :w//2]
+            right_half = mask[:, w//2:]
+            
+            # Count pixels in each half
+            left_pixels = np.sum(left_half > 0)
+            right_pixels = np.sum(right_half > 0)
+            
+            # Compare with threshold
+            if left_pixels > 200 and left_pixels > right_pixels * 1.5:
+                print(f"ADVANCED: Detected RIGHT eye (OD) by color distribution")
+                return "right"
+            elif right_pixels > 200 and right_pixels > left_pixels * 1.5:
+                print(f"ADVANCED: Detected LEFT eye (OS) by color distribution")
+                return "left"
+    except Exception as e:
+        print(f"Error in advanced color detection: {e}")
+    
+    # 3. Image feature differences (often right and left eye scans have different patterns)
+    try:
+        # Analyze general image brightness distribution
+        # Right eye and left eye OCT scans often have different brightness patterns
+        gray_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        h, w = gray_img.shape
+        
+        # Divide the image into quadrants
+        left_side = gray_img[:, :w//2]
+        right_side = gray_img[:, w//2:]
+        
+        # Calculate brightness differences
+        left_brightness = np.mean(left_side)
+        right_brightness = np.mean(right_side)
+        
+        brightness_diff = abs(left_brightness - right_brightness)
+        if brightness_diff > 10:  # Significant difference
+            if left_brightness > right_brightness:
+                print(f"ADVANCED: Detected potential RIGHT eye (OD) by brightness pattern")
+                return "right"
+            else:
+                print(f"ADVANCED: Detected potential LEFT eye (OS) by brightness pattern")
+                return "left"
+    except Exception as e:
+        print(f"Error in advanced pattern detection: {e}")
+    
+    # 4. OCR with a larger region and additional text markers
+    try:
+        # Use a larger region for OCR to catch more text
+        top_half = image[0:height//2, :]
+        gray_top = cv2.cvtColor(top_half, cv2.COLOR_BGR2GRAY)
+        
+        global READER
+        all_text = ' '.join(READER.readtext(gray_top, detail=0)).upper()
+        
+        # Look for specific patterns in the text that might indicate eye side
+        od_indicators = ["OD", "RIGHT EYE", "RIGHT", "R EYE"]
+        os_indicators = ["OS", "LEFT EYE", "LEFT", "L EYE"]
+        
+        # Count occurrences of each indicator
+        od_count = sum(all_text.count(indicator) for indicator in od_indicators)
+        os_count = sum(all_text.count(indicator) for indicator in os_indicators)
+        
+        if od_count > 0 and od_count > os_count:
+            print(f"ADVANCED: Detected RIGHT eye (OD) by text indicators")
+            return "right"
+        elif os_count > 0 and os_count > od_count:
+            print(f"ADVANCED: Detected LEFT eye (OS) by text indicators")
+            return "left"
+    except Exception as e:
+        print(f"Error in advanced OCR detection: {e}")
+    
+    # 5. Last resort - check image filename for indicators of eye side
+    try:
+        filename = os.path.basename(image_path).upper()
+        
+        # Check for common filename patterns indicating eye side
+        if "_OD_" in filename or "_R_" in filename or "_RIGHT_" in filename or filename.startswith("OD_") or filename.startswith("R_"):
+            print(f"ADVANCED: Detected RIGHT eye (OD) from filename")
+            return "right"
+        elif "_OS_" in filename or "_L_" in filename or "_LEFT_" in filename or filename.startswith("OS_") or filename.startswith("L_"):
+            print(f"ADVANCED: Detected LEFT eye (OS) from filename")
+            return "left"
+    except Exception as e:
+        print(f"Error in filename analysis: {e}")
+    
+    # If all advanced methods fail
+    print("ADVANCED: Could not determine eye side with advanced methods")
+    return None
+
 def check_if_macula_thickness(image_path):
     """Check if the image is a macula thickness map based on title text"""
     image = cv2.imread(image_path)
@@ -350,6 +501,7 @@ def copy_patient_images(patient_folder, unsorted_folder):
             dest_path = os.path.join(unsorted_folder, f"{base}_{counter}{ext}")
             
         try:
+            # Use shutil.copy2 to preserve metadata
             shutil.copy2(image_path, dest_path)
             copied_count += 1
         except Exception as e:
@@ -398,20 +550,20 @@ def pre_process_images(folders):
                 # This is not a macula thickness map (e.g., line raster)
                 dest_path = os.path.join(other_scans_folder, filename)
                 try:
-                    shutil.copy2(image_path, dest_path)
+                    shutil.move(image_path, dest_path)  # CHANGED: copy2 to move
                     other_count += 1
-                    print(f"Copied to other_scans folder: {filename}")
+                    print(f"Moved to other_scans folder: {filename}")
                 except Exception as e:
-                    print(f"Error copying {filename}: {e}")
+                    print(f"Error moving {filename}: {e}")
             else:
                 # This is an invalid macula thickness map
                 dest_path = os.path.join(invalid_folder, filename)
                 try:
-                    shutil.copy2(image_path, dest_path)
+                    shutil.move(image_path, dest_path)  # CHANGED: copy2 to move
                     invalid_count += 1
-                    print(f"Copied to invalid folder: {filename}")
+                    print(f"Moved to invalid folder: {filename}")
                 except Exception as e:
-                    print(f"Error copying {filename}: {e}")
+                    print(f"Error moving {filename}: {e}")
         else:
             # We have a valid macula thickness map
             valid_count += 1
@@ -420,23 +572,42 @@ def pre_process_images(folders):
             if eye_side == "left":
                 dest_path = os.path.join(left_folder, filename)
                 try:
-                    shutil.copy2(image_path, dest_path)
+                    shutil.move(image_path, dest_path)  # CHANGED: copy2 to move
                     auto_sorted_left += 1
                     print(f"Auto-sorted to left eye folder: {filename}")
                 except Exception as e:
-                    print(f"Error copying {filename}: {e}")
+                    print(f"Error moving {filename}: {e}")
             elif eye_side == "right":
                 dest_path = os.path.join(right_folder, filename)
                 try:
-                    shutil.copy2(image_path, dest_path)
+                    shutil.move(image_path, dest_path)  # CHANGED: copy2 to move
                     auto_sorted_right += 1
                     print(f"Auto-sorted to right eye folder: {filename}")
                 except Exception as e:
-                    print(f"Error copying {filename}: {e}")
+                    print(f"Error moving {filename}: {e}")
             else:
-                # Could not determine eye side, leave in unsorted for manual sorting
-                manual_sort_needed += 1
-                print(f"Eye side not detected, manual sorting needed: {filename}")
+                # Try advanced eye detection for images that couldn't be classified initially
+                advanced_eye_side = advanced_eye_detection(image_path)
+                if advanced_eye_side == "left":
+                    dest_path = os.path.join(left_folder, filename)
+                    try:
+                        shutil.move(image_path, dest_path)  # CHANGED: copy2 to move
+                        auto_sorted_left += 1
+                        print(f"Advanced auto-sorted to left eye folder: {filename}")
+                    except Exception as e:
+                        print(f"Error moving {filename}: {e}")
+                elif advanced_eye_side == "right":
+                    dest_path = os.path.join(right_folder, filename)
+                    try:
+                        shutil.move(image_path, dest_path)  # CHANGED: copy2 to move
+                        auto_sorted_right += 1
+                        print(f"Advanced auto-sorted to right eye folder: {filename}")
+                    except Exception as e:
+                        print(f"Error moving {filename}: {e}")
+                else:
+                    # Could not determine eye side, leave in unsorted for manual sorting
+                    manual_sort_needed += 1
+                    print(f"Eye side not detected, manual sorting needed: {filename}")
     
     print(f"\nPre-processing complete:")
     print(f"  Valid macula thickness maps: {valid_count}")
@@ -672,6 +843,9 @@ def process_patient_images(folders):
     return True
 
 def main():
+    # Start timing the entire process
+    start_time = time.time()
+    
     # Initialize EasyOCR reader with English language (just once, globally)
     global READER
     print("Initializing EasyOCR reader... (this may take a moment on first run)")
@@ -727,10 +901,30 @@ def main():
     patients_needing_review = []
     
     # Process each patient
+    patient_times = []  # Track time for each patient to estimate remaining time
     for patient_index, patient_folder in enumerate(selected_patients):
+        patient_start_time = time.time()
         patient_name = os.path.basename(patient_folder)
+        
         print("\n" + "="*80)
         print(f"PROCESSING PATIENT {patient_index+1}/{total_patients}: {patient_name}")
+        
+        # Show estimated time remaining if we have processed at least one patient
+        if patient_times:
+            avg_time_per_patient = sum(patient_times) / len(patient_times)
+            remaining_patients = total_patients - (patient_index)
+            est_time_remaining = avg_time_per_patient * remaining_patients
+            
+            # Format time remaining
+            if est_time_remaining < 60:
+                time_str = f"{est_time_remaining:.1f} seconds"
+            elif est_time_remaining < 3600:
+                time_str = f"{est_time_remaining/60:.1f} minutes"
+            else:
+                time_str = f"{est_time_remaining/3600:.1f} hours"
+                
+            print(f"Estimated time remaining: {time_str} ({patient_index}/{total_patients} patients processed)")
+        
         print("="*80)
         
         # Setup folders for this patient
@@ -760,7 +954,12 @@ def main():
         if unsorted_files:
             patients_needing_review.append((patient_name, len(unsorted_files), folders['processed_folder']))
         
-        print(f"\nFinished processing patient: {patient_name}")
+        # Record how long this patient took
+        patient_end_time = time.time()
+        patient_duration = patient_end_time - patient_start_time
+        patient_times.append(patient_duration)
+        
+        print(f"\nFinished processing patient: {patient_name} (took {patient_duration:.1f} seconds)")
     
     # Update the summary file with all patients needing review
     if patients_needing_review:
@@ -775,7 +974,28 @@ def main():
     else:
         print("\nAll patients were processed successfully with no images needing manual review.")
     
-    print("\nAll patients have been processed!")
+    # Calculate and display total time taken
+    end_time = time.time()
+    total_duration = end_time - start_time
+    
+    # Format total time in a readable way
+    if total_duration < 60:
+        time_str = f"{total_duration:.1f} seconds"
+    elif total_duration < 3600:
+        time_str = f"{total_duration/60:.1f} minutes"
+    else:
+        hours = int(total_duration // 3600)
+        minutes = int((total_duration % 3600) // 60)
+        seconds = int(total_duration % 60)
+        time_str = f"{hours} hours, {minutes} minutes, {seconds} seconds"
+    
+    print("\n" + "="*80)
+    print(f"PROCESSING COMPLETE! Total time taken: {time_str}")
+    print(f"Processed {len(selected_patients)} patients with {len(patients_needing_review)} needing manual review")
+    print("="*80)
+
+if __name__ == '__main__':
+    main()
 
 if __name__ == '__main__':
     main()
